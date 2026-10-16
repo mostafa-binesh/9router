@@ -1,0 +1,86 @@
+name: Fork publish (v0.5.104-fork.1)
+
+on:
+  push:
+    tags: [v0.5.104-fork.1]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Ref to publish
+        type: string
+        default: publish/v0.5.104-fork.1
+
+concurrency:
+  group: fork-publish-v0.5.104-fork.1
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            suffix: amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            suffix: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 1 }
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: ${{ github.actor }}, password: ${{ secrets.GITHUB_TOKEN }} }
+      - name: Build and push platform image by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ fromJSON(format('ghcr.io/{0}', github.repository)) }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            APP_VERSION=0.5.104-fork.1
+            ALPINE_MIRROR=${{ vars.ALPINE_MIRROR || 'dl-cdn.alpinelinux.org' }}
+            NPM_REGISTRY=${{ vars.NPM_REGISTRY || 'https://registry.npmjs.org/' }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=0.5.104-fork.1
+          cache-from: type=gha,scope=fork-v0.5.104-fork.1-${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=fork-v0.5.104-fork.1-${{ matrix.suffix }}
+          provenance: false
+          sbom: false
+      - name: Save image digest
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/digests"
+          printf '%s\n' "${{ steps.build.outputs.digest }}" > "${RUNNER_TEMP}/digests/${{ matrix.suffix }}.txt"
+      - name: Upload image digest
+        uses: actions/upload-artifact@v4
+        with: { name: digests-${{ matrix.suffix }}, path: ${{ runner.temp }}/digests/${{ matrix.suffix }}.txt, if-no-files-found: error }
+
+  publish:
+    name: Publish manifest
+    needs: build
+    runs-on: ubuntu-latest
+    permissions: { packages: write }
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: ${{ github.actor }}, password: ${{ secrets.GITHUB_TOKEN }} }
+      - name: Download platform digests
+        uses: actions/download-artifact@v4
+        with: { pattern: digests-*, path: ${{ runner.temp }}/digests, merge-multiple: true }
+      - run: |
+          set -euo pipefail
+          ghcr="ghcr.io/${GITHUB_REPOSITORY@L}"
+          mapfile -t files < <(printf '%s\n' "${RUNNER_TEMP}"/digests/*.txt)
+          sources=(); for f in "${files[@]}"; do d="$(tr -d '\n' < "$f")"; sources+=("${ghcr}@${d}"); done
+          docker buildx imagetools create --tag "${ghcr}:0.5.104-fork.1" "${sources[@]}"
+          docker buildx imagetools inspect "${ghcr}:0.5.104-fork.1" | tee "${RUNNER_TEMP}/manifest.txt"
