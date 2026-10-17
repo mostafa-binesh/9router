@@ -1177,14 +1177,18 @@ Models:
   2. glm/glm-4.7 (then fall back)
 ```
 
-Retries only happen when a repeat can actually reach the provider. Every failed
-call locks that connection for the model — quota/rate-limit locks last minutes,
-transient ones seconds — so 9Router waits a short lock out and retries, but
-skips straight to the next model when the lock is too long to wait for
-(`COMBO_ATTEMPT_LOCK_WAIT_MS`, default 5000) or when the status says the
-credential, not the request, is the problem (401/402/403/404/429). Cap: 10
-attempts per member, 32 per request, and `COMBO_ATTEMPT_TOTAL_WAIT_MS` (default
-15000) of lock waiting per request.
+Retries only happen when a repeat can actually reach the provider. On a keyed
+provider every failed call locks that connection for the model — quota locks last
+minutes, transient ones seconds — so 9Router reads the lock's window from the
+failed response and waits a short one out before repeating, but skips straight to
+the next model when the lock is too long to wait for
+(`COMBO_ATTEMPT_LOCK_WAIT_MS`, default 5000). Free (no-auth) providers never lock,
+so a repeat calls upstream at once — which is what makes a `#N` member useful on
+a free tier that answers 429 constantly. An account-scoped failure where the
+credential, not the request, is the problem (401/402/403/404) ends the member's
+turn immediately; a 429 does not (rate limits are transient by definition). Cap:
+10 attempts per member, 32 per request, and `COMBO_ATTEMPT_TOTAL_WAIT_MS`
+(default 15000) of lock waiting per request.
 
 </details>
 
