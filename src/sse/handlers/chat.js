@@ -164,7 +164,7 @@ export async function handleChat(request, clientRawRequest = null) {
       body,
       models: withComboAttempts(comboModels, augmentedModels),
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
+        (b, m, attempt) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, null, { ignoreModelLock: attempt > 1 }),
         adapterAdded
       ),
       log,
@@ -196,7 +196,7 @@ export async function handleChat(request, clientRawRequest = null) {
       body,
       models: soloAugmented,
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
+        (b, m, attempt) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, null, { ignoreModelLock: attempt > 1 }),
         adapterAdded
       ),
       log,
@@ -211,7 +211,7 @@ export async function handleChat(request, clientRawRequest = null) {
 /**
  * Handle single model chat request
  */
-async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, requestedModel = null) {
+async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, requestedModel = null, options = null) {
   const modelInfo = await getModelInfo(modelStr);
 
   // If provider is null, this might be a combo name - check and handle
@@ -260,7 +260,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         body,
         models: withComboAttempts(comboModels, augmentedModels),
         handleSingleModel: withCapacityAdapterStripping(
-          (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
+          (b, m, attempt) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, null, { ignoreModelLock: attempt > 1 }),
           adapterAdded
         ),
         log,
@@ -299,7 +299,13 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   let lastHeaders = null;
 
   while (true) {
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, { requestedModel: requestedModel || model });
+    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, {
+      requestedModel: requestedModel || model,
+      // The combo's repeat of a member: make the call even though this failure
+      // locked the connection for the model, instead of answering it from the
+      // lock table.
+      ignoreModelLock: options?.ignoreModelLock === true,
+    });
 
     // All accounts unavailable
     if (!credentials || credentials.allRateLimited) {

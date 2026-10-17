@@ -250,18 +250,23 @@ a repeat never takes a rotation slot away from another model.
 Attempts respect the model lock. On a keyed provider every failure locks the
 connection for that model (`markAccountUnavailable`), so an immediate repeat would
 be answered from the lock table without reaching the provider. `handleComboChat`
-therefore reads the lock's window from the failed response's `retry-after`
-header and waits it out when it is short (`COMBO_ATTEMPT_LOCK_WAIT_MS`, default
-5000ms). Free (no-auth) providers write no lock at all, so their repeats go
-straight upstream. The remaining attempts are skipped when the lock is longer
-than that wait, when the request has spent its total wait budget, or when the
-status is account-scoped (401/402/403/404 — `isNonRetryableStatus`; the predicate
-is `canRepeatComboMember`). A 429 is *not* account-scoped: rate limits are
-transient, so a rate-limited member keeps its remaining attempts. Caps:
-`MAX_COMBO_ATTEMPTS` per member (10), `MAX_COMBO_TOTAL_ATTEMPTS` per request (32),
-and `COMBO_ATTEMPT_TOTAL_WAIT_MS` (default 15000ms) of lock waiting per request, so
-a combo of flaky models cannot hold the client open for minutes. Only a trailing
-positive integer counts, so a literal `#` in a model id is never eaten.
+therefore reads the wait the failure reported (`retry-after`) and waits it out
+when it is short enough to be worth it (`COMBO_ATTEMPT_LOCK_WAIT_MS`, default
+5000ms). A longer wait — a free tier's `retry-after` is often minutes — is not
+waited out, because sleeping that long would stall the client and the provider's
+window usually clears while the member's attempts go out; those repeats continue
+on a light fixed pace (`COMBO_ATTEMPT_RETRY_PACE_MS`, default 250ms) so the member
+still gets every attempt it was configured with. Repeats pass
+`ignoreModelLock` down to credential selection so the stale lock of the failure
+being repeated cannot swallow the attempt, and free (no-auth) providers write no
+lock in the first place. The member's turn ends early when the status is
+account-scoped (401/402/403/404 — `isNonRetryableStatus`) or when the request has
+spent its pause budget. A 429 is *not* account-scoped: rate limits are transient,
+so a rate-limited member keeps its remaining attempts. Caps: `MAX_COMBO_ATTEMPTS`
+per member (10), `MAX_COMBO_TOTAL_ATTEMPTS` per request (32), and
+`COMBO_ATTEMPT_TOTAL_WAIT_MS` (default 15000ms) of pausing per request, so a combo
+of flaky models cannot hold the client open for minutes. Only a trailing positive
+integer counts, so a literal `#` in a model id is never eaten.
 
 ## OAuth Onboarding and Token Refresh Lifecycle
 
