@@ -1179,16 +1179,19 @@ Models:
 
 Retries only happen when a repeat can actually reach the provider. On a keyed
 provider every failed call locks that connection for the model — quota locks last
-minutes, transient ones seconds — so 9Router reads the lock's window from the
-failed response and waits a short one out before repeating, but skips straight to
-the next model when the lock is too long to wait for
-(`COMBO_ATTEMPT_LOCK_WAIT_MS`, default 5000). Free (no-auth) providers never lock,
-so a repeat calls upstream at once — which is what makes a `#N` member useful on
-a free tier that answers 429 constantly. An account-scoped failure where the
-credential, not the request, is the problem (401/402/403/404) ends the member's
-turn immediately; a 429 does not (rate limits are transient by definition). Cap:
-10 attempts per member, 32 per request, and `COMBO_ATTEMPT_TOTAL_WAIT_MS`
-(default 15000) of lock waiting per request.
+minutes, transient ones seconds — so 9Router waits a lock that is short enough to
+be worth waiting for (`COMBO_ATTEMPT_LOCK_WAIT_MS`, default 5000) and then retries.
+A longer one (a free tier's `retry-after` is often minutes) is not waited out —
+sleeping that long would stall the client and the window usually clears anyway —
+so the member keeps its configured attempts on a light pace
+(`COMBO_ATTEMPT_RETRY_PACE_MS`, default 250) instead: a `#10` member stays ten real
+calls, and repeats ignore the stale model lock so they are answered by the
+provider and not by the lock table. Free (no-auth) providers never write a lock,
+so they get the same treatment. An account-scoped failure where the credential,
+not the request, is the problem (401/402/403/404) ends the member's turn
+immediately; a 429 does not (rate limits are transient by definition). Cap: 10
+attempts per member, 32 per request, and `COMBO_ATTEMPT_TOTAL_WAIT_MS` (default
+15000) of pausing per request.
 
 </details>
 

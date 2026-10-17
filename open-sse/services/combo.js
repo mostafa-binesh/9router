@@ -6,7 +6,7 @@ import { checkFallbackError, formatRetryAfter, isNonRetryableStatus } from "./ac
 import { unavailableResponse } from "../utils/error.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { extractTextContent } from "../translator/formats/gemini.js";
-import { COMBO_ATTEMPT_LOCK_WAIT_MS, COMBO_ATTEMPT_TOTAL_WAIT_MS } from "../config/runtimeConfig.js";
+import { COMBO_ATTEMPT_LOCK_WAIT_MS, COMBO_ATTEMPT_RETRY_PACE_MS, COMBO_ATTEMPT_TOTAL_WAIT_MS } from "../config/runtimeConfig.js";
 import { MAX_COMBO_TOTAL_ATTEMPTS, parseComboModels, stripComboAttempts } from "./comboEntry.js";
 
 // Hard capabilities = input modalities; missing one drops request data (e.g. image
@@ -337,31 +337,45 @@ function transientPauseMs(status, cooldownMs) {
   return cooldownMs;
 }
 
+/**
+ * How long to wait before repeating a member.
+ *
+ * A wait at or below the per-attempt window is waited out exactly — that is the
+ * wait the failure asked for, and the repeat after it can really reach the
+ * provider. A longer one (minutes, e.g. a free tier's `retry-after`) is not
+ * waited out: the client would stall for minutes, and the provider's window
+ * usually clears while the member's attempts go out. Those repeats continue on a
+ * light fixed pace instead, so the member still gets every attempt it was
+ * configured with.
+ */
+function repeatPauseMs({ lockMs, status, cooldownMs }) {
+  if (lockMs > 0) {
+    return lockMs <= COMBO_ATTEMPT_LOCK_WAIT_MS ? lockMs : COMBO_ATTEMPT_RETRY_PACE_MS;
+  }
+  return transientPauseMs(status, cooldownMs) || COMBO_ATTEMPT_RETRY_PACE_MS;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
  * Whether a failed member should be tried again, or the turn handed to the next
- * member. Credential and model errors end the member's turn immediately. Anything
- * else repeats while the repeat can actually reach the provider: a failure on a
- * keyed provider locks the connection for that model, so the combo waits that
- * lock out (bounded per attempt, and bounded in total for the whole request); a
- * free/no-auth provider writes no lock at all, so the repeat calls upstream at
- * once.
+ * member. Credential and model errors end the member's turn immediately; anything
+ * else keeps its remaining attempts while the request still has pause budget left
+ * (a repeat that cannot reach the provider is paced, not skipped — see
+ * `repeatPauseMs`).
  *
  * @param {Object} o
  * @param {number} o.remaining - attempts left for this member
  * @param {number} o.status - HTTP status of the failed attempt
- * @param {number} o.lockMs - how long the model lock outlives the failure
  * @param {number} o.pauseMs - the pause a repeat would wait
- * @param {number} o.waitedMs - lock wait already spent on this request
+ * @param {number} o.waitedMs - pause already spent on this request
  * @returns {boolean}
  */
-export function canRepeatComboMember({ remaining, status, lockMs, pauseMs, waitedMs }) {
+export function canRepeatComboMember({ remaining, status, pauseMs, waitedMs }) {
   if (remaining <= 0) return false;
   if (isNonRetryableStatus(status)) return false;
-  if (lockMs > COMBO_ATTEMPT_LOCK_WAIT_MS) return false;
   return waitedMs + pauseMs <= COMBO_ATTEMPT_TOTAL_WAIT_MS;
 }
 
@@ -426,7 +440,7 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
     for (let attempt = 1; attempt <= entryAttempts; attempt++) {
       budget--;
       try {
-        const result = await handleSingleModel(body, modelStr);
+        const result = await handleSingleModel(body, modelStr, attempt);
 
         // Success (2xx) - return response unless empty/zero-content on a non-final seat
         if (result.ok) {
@@ -483,20 +497,20 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
         lastError = errorText || String(result.status);
         if (!lastStatus) lastStatus = result.status;
 
+        // Repeat the same member. The attempt may have to ignore the model lock
+        // its own failure wrote (see the `ignoreModelLock` call option): an
+        // immediate repeat would otherwise be answered from the lock table
+        // without reaching the provider, counting as an attempt without being one.
         const remaining = entryAttempts - attempt;
         const lockMs = retryAfter ? Math.max(retryAfter - Date.now(), 0) : 0;
-        // A repeat waits out the model lock; a short transient cooldown moves in
-        // anyway, so the pause is the longer of the two.
-        const pauseMs = Math.max(lockMs, transientPauseMs(result.status, cooldownMs));
-        const canRepeat = canRepeatComboMember({ remaining, status: result.status, lockMs, pauseMs, waitedMs });
+        const pauseMs = repeatPauseMs({ lockMs, status: result.status, cooldownMs });
+        const canRepeat = canRepeatComboMember({ remaining, status: result.status, pauseMs, waitedMs });
 
         if (!canRepeat) {
           if (remaining > 0) {
             const why = isNonRetryableStatus(result.status)
               ? "credential/model error"
-              : (lockMs > COMBO_ATTEMPT_LOCK_WAIT_MS
-                ? `lock outlasts ${COMBO_ATTEMPT_LOCK_WAIT_MS}ms`
-                : `wait budget of ${COMBO_ATTEMPT_TOTAL_WAIT_MS}ms spent`);
+              : `pause budget of ${COMBO_ATTEMPT_TOTAL_WAIT_MS}ms spent`;
             log.info("COMBO", `Model ${modelStr} failed (${result.status}, ${why}), skipping remaining ${remaining} attempt(s)`);
           }
           const courtesyMs = transientPauseMs(result.status, cooldownMs);
@@ -508,16 +522,9 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
           break;
         }
 
-        // Repeat the same member. On a keyed provider this failure locked the
-        // model for the connection, so wait the lock out first — an immediate
-        // repeat would be answered from the lock table without reaching the
-        // provider. Free/no-auth providers write no lock (pauseMs is 0) and the
-        // repeat goes straight upstream.
-        log.warn("COMBO", `Model ${modelStr} failed (${result.status}), attempt ${attempt}/${entryAttempts}${pauseMs ? ` after ${pauseMs}ms` : ""}`);
-        if (pauseMs) {
-          waitedMs += pauseMs;
-          await sleep(pauseMs);
-        }
+        log.warn("COMBO", `Model ${modelStr} failed (${result.status}), attempt ${attempt}/${entryAttempts}, repeating in ${pauseMs}ms${lockMs > COMBO_ATTEMPT_LOCK_WAIT_MS ? ` (provider asked ${Math.round(lockMs / 1000)}s)` : ""}`);
+        waitedMs += pauseMs;
+        await sleep(pauseMs);
       } catch (error) {
         // Catch unexpected exceptions to ensure fallback continues
         lastError = error.message || String(error);

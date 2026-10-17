@@ -83,15 +83,20 @@ export const DEFAULT_RETRY_CONFIG = {
 };
 
 // Combo members may carry an attempt count (`provider/model#3`, see
-// services/comboEntry.js). A failed attempt locks that connection for the model
-// — quota/rate-limit locks last minutes, transient ones seconds — so a repeat
-// only makes sense while the lock is short enough to wait out. Beyond this
-// window the combo stops retrying that member and moves to the next model.
+// services/comboEntry.js). A pause this short or shorter — the wait a failure
+// reported through a model lock — is waited out exactly, because that is the
+// wait the provider asked for and the repeat that follows can really reach it.
 export const COMBO_ATTEMPT_LOCK_WAIT_MS = envMs("COMBO_ATTEMPT_LOCK_WAIT_MS", 5000);
 
-// Total time one request may spend waiting out model locks, across every member
-// and attempt, so a combo of flaky models cannot hold the client open for
-// minutes. Once spent, the combo stops repeating and just falls through.
+// A longer reported wait is not waited out: minutes of sleeping would stall the
+// client, and the provider's window usually clears while the member's attempts go
+// out. The member keeps its configured attempts on this light pace instead, so a
+// `#10` member is ten real calls rather than one call and a skip.
+export const COMBO_ATTEMPT_RETRY_PACE_MS = envMs("COMBO_ATTEMPT_RETRY_PACE_MS", 250);
+
+// Total time one request may spend pausing between attempts, across every member,
+// so a combo of flaky models cannot hold the client open for minutes. Once spent,
+// the combo stops repeating and just falls through.
 export const COMBO_ATTEMPT_TOTAL_WAIT_MS = envMs("COMBO_ATTEMPT_TOTAL_WAIT_MS", 15000);
 
 // Normalize a retry entry to { attempts, delayMs }

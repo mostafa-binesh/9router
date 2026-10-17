@@ -143,16 +143,20 @@ describe("handleComboChat — attempts per member", () => {
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(900);
   });
 
-  it("skips the remaining attempts when the lock outlasts the wait window", async () => {
-    const locked = () => jsonResponse(503, { error: { message: "Service Unavailable" } }, { "retry-after": "3600" });
-    const { handler, calls } = scriptedHandler([locked, okResponse]);
+  // Regression: the upstream's own long `retry-after` (a free tier asking for
+  // minutes) used to cancel the member's remaining attempts outright.
+  it("keeps the attempts when the reported wait is longer than the window", async () => {
+    const limited = () => jsonResponse(429, { error: { message: "Rate limit exceeded" } }, { "retry-after": "600" });
+    const { handler, calls } = scriptedHandler([limited, limited, limited]);
     const startedAt = Date.now();
     const result = await handleComboChat({
-      body: {}, models: ["p/a#3", "p/b"], handleSingleModel: handler, log,
+      body: {}, models: ["oc/deepseek#3"], handleSingleModel: handler, log,
     });
-    expect(calls).toEqual(["p/a", "p/b"]);
-    expect(result.ok).toBe(true);
-    expect(Date.now() - startedAt).toBeLessThan(900);
+    expect(calls).toEqual(["oc/deepseek", "oc/deepseek", "oc/deepseek"]);
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe(429);
+    // Repeats are paced, not skipped — and not slept out for the 600s asked for.
+    expect(Date.now() - startedAt).toBeLessThan(3000);
   });
 
   it("does not repeat a credential error", async () => {
@@ -176,9 +180,8 @@ describe("handleComboChat — attempts per member", () => {
     });
     expect(calls).toEqual(["oc/deepseek", "oc/deepseek", "oc/deepseek"]);
     expect(result.ok).toBe(true);
-    // A free/no-auth provider writes no model lock, so the repeat calls upstream
-    // at once instead of waiting a cooldown out.
-    expect(Date.now() - startedAt).toBeLessThan(900);
+    // Paced off the provider's answer, far quicker than a cooldown wait.
+    expect(Date.now() - startedAt).toBeLessThan(1500);
   });
 
   it("spends every configured attempt on a member that keeps rate limiting", async () => {
@@ -189,7 +192,7 @@ describe("handleComboChat — attempts per member", () => {
     });
     expect(calls).toEqual(Array.from({ length: 10 }, () => "oc/deepseek").concat(["p/b"]));
     expect(result.ok).toBe(true);
-  });
+  }, 20_000);
 
   it("retries a member whose call threw", async () => {
     const { handler, calls } = scriptedHandler([
@@ -211,7 +214,7 @@ describe("handleComboChat — attempts per member", () => {
     expect(calls).toHaveLength(MAX_COMBO_TOTAL_ATTEMPTS);
     expect(result.ok).toBe(false);
     expect(result.status).toBe(503);
-  });
+  }, 30_000);
 
   it("keeps round-robin order and the member's own attempts", async () => {
     const { handler, calls } = scriptedHandler([busy, busy, okResponse]);
@@ -239,7 +242,7 @@ describe("handleComboChat — attempts per member", () => {
 });
 
 describe("canRepeatComboMember", () => {
-  const base = { remaining: 2, status: 503, lockMs: 0, pauseMs: 0, waitedMs: 0 };
+  const base = { remaining: 2, status: 503, pauseMs: 250, waitedMs: 0 };
 
   it("repeats a transient failure that leaves attempts", () => {
     expect(canRepeatComboMember(base)).toBe(true);
@@ -262,9 +265,11 @@ describe("canRepeatComboMember", () => {
     expect(canRepeatComboMember({ ...base, status: 429 })).toBe(true);
   });
 
-  it("does not wait out a lock longer than the per-attempt window", () => {
-    expect(canRepeatComboMember({ ...base, lockMs: 30_000, pauseMs: 30_000 })).toBe(false);
-    expect(canRepeatComboMember({ ...base, lockMs: 1_000, pauseMs: 1_000 })).toBe(true);
+  it("does not skip a long wait, the caller paces it instead", () => {
+    // `repeatPauseMs` caps a long reported wait to the pace; the predicate only
+    // sees the pause it will actually make.
+    expect(canRepeatComboMember({ ...base, pauseMs: 250 })).toBe(true);
+    expect(canRepeatComboMember({ ...base, pauseMs: 1_000 })).toBe(true);
   });
 
   it("does not exceed the per-request wait budget", () => {
