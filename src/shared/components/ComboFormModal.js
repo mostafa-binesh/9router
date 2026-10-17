@@ -5,11 +5,12 @@ import Modal from "./Modal";
 import Input from "./Input";
 import Button from "./Button";
 import ModelSelectModal from "./ModelSelectModal";
+import { MAX_COMBO_ATTEMPTS, formatComboEntry, mergeComboEntryText, parseComboEntry } from "open-sse/services/comboEntry.js";
 
 const VALID_NAME_REGEX = /^[a-zA-Z0-9_.\-]+$/;
 
 // Inline editable model item
-function ModelItem({ index, model, isFirst, isLast, onEdit, onMoveUp, onMoveDown, onRemove }) {
+function ModelItem({ index, model, attempts, isFirst, isLast, onEdit, onSetAttempts, onMoveUp, onMoveDown, onRemove }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(model);
   const commit = () => {
@@ -32,6 +33,17 @@ function ModelItem({ index, model, isFirst, isLast, onEdit, onMoveUp, onMoveDown
         <div className="min-w-0 flex-1 cursor-text truncate rounded px-1.5 py-0.5 font-mono text-xs text-text-main hover:bg-black/5 dark:hover:bg-white/5"
           onClick={() => setEditing(true)} title="Click to edit">{model}</div>
       )}
+      <div className="flex shrink-0 items-center gap-0.5" title={`Try this model up to ${attempts} time${attempts === 1 ? "" : "s"} before the next combo member`}>
+        <button onClick={() => onSetAttempts(attempts - 1)} disabled={attempts <= 1}
+          className={`p-0.5 rounded ${attempts <= 1 ? "text-text-muted/20 cursor-not-allowed" : "text-text-muted hover:text-primary hover:bg-black/5 dark:hover:bg-white/5"}`} title="Fewer attempts">
+          <span className="material-symbols-outlined text-[12px]">remove</span>
+        </button>
+        <span className={`w-5 text-center font-mono text-[10px] ${attempts > 1 ? "font-semibold text-primary" : "text-text-muted"}`}>×{attempts}</span>
+        <button onClick={() => onSetAttempts(attempts + 1)} disabled={attempts >= MAX_COMBO_ATTEMPTS}
+          className={`p-0.5 rounded ${attempts >= MAX_COMBO_ATTEMPTS ? "text-text-muted/20 cursor-not-allowed" : "text-text-muted hover:text-primary hover:bg-black/5 dark:hover:bg-white/5"}`} title="More attempts">
+          <span className="material-symbols-outlined text-[12px]">add</span>
+        </button>
+      </div>
       <div className="flex shrink-0 items-center gap-0.5">
         <button onClick={onMoveUp} disabled={isFirst}
           className={`p-0.5 rounded ${isFirst ? "text-text-muted/20 cursor-not-allowed" : "text-text-muted hover:text-primary hover:bg-black/5 dark:hover:bg-white/5"}`} title="Move up">
@@ -90,6 +102,11 @@ export default function ComboFormModal({ isOpen, combo, onClose, onSave, activeP
     setModels(models.filter((m) => m !== model.value));
   };
   const handleRemoveModel = (i) => setModels(models.filter((_, idx) => idx !== i));
+  // Keep the attempt count when only the model id is edited by hand.
+  const handleEditModel = (i, value) => setModels(models.map((m, idx) => (idx === i ? mergeComboEntryText(value, m) : m)));
+  const handleSetAttempts = (i, attempts) => setModels(models.map((m, idx) => (
+    idx === i ? formatComboEntry(parseComboEntry(m).model, attempts) : m
+  )));
   const handleMoveUp = (i) => {
     if (i === 0) return;
     const a = [...models]; [a[i - 1], a[i]] = [a[i], a[i - 1]]; setModels(a);
@@ -142,8 +159,10 @@ export default function ComboFormModal({ isOpen, combo, onClose, onSave, activeP
               <div className="flex max-h-[55vh] min-w-0 flex-col gap-1 overflow-y-auto sm:max-h-[350px]">
                 {models.map((model, index) => (
                   <ModelItem key={index} index={index} model={model}
+                    attempts={parseComboEntry(model).attempts}
                     isFirst={index === 0} isLast={index === models.length - 1}
-                    onEdit={(v) => { const a = [...models]; a[index] = v; setModels(a); }}
+                    onEdit={(v) => handleEditModel(index, v)}
+                    onSetAttempts={(attempts) => handleSetAttempts(index, attempts)}
                     onMoveUp={() => handleMoveUp(index)}
                     onMoveDown={() => handleMoveDown(index)}
                     onRemove={() => handleRemoveModel(index)} />
