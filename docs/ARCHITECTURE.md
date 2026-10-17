@@ -247,18 +247,21 @@ dashboard). The combo tries that member up to 3 times before handing the turn to
 the next one; rotation and capability auto-switch treat a member as one slot, so
 a repeat never takes a rotation slot away from another model.
 
-Attempts respect the model lock: every failure locks the connection for that
-model (`markAccountUnavailable`), so an immediate repeat would be answered from
-the lock table without reaching the provider. `handleComboChat` therefore reads
-the lock's window from the failed response's `retry-after` header, waits it out
-when it is short (`COMBO_ATTEMPT_LOCK_WAIT_MS`, default 5000ms), and skips the
-remaining attempts when it is longer or when the status is account-scoped
-(401/402/403/404/429 — `isNonRetryableStatus`; the predicate is
-`canRepeatComboMember`). Caps: `MAX_COMBO_ATTEMPTS` per member (10),
-`MAX_COMBO_TOTAL_ATTEMPTS` per request (32), and `COMBO_ATTEMPT_TOTAL_WAIT_MS`
-(default 15000ms) of lock waiting per request, so a combo of flaky models cannot
-hold the client open for minutes. Only a trailing positive integer counts, so a
-literal `#` in a model id is never eaten.
+Attempts respect the model lock. On a keyed provider every failure locks the
+connection for that model (`markAccountUnavailable`), so an immediate repeat would
+be answered from the lock table without reaching the provider. `handleComboChat`
+therefore reads the lock's window from the failed response's `retry-after`
+header and waits it out when it is short (`COMBO_ATTEMPT_LOCK_WAIT_MS`, default
+5000ms). Free (no-auth) providers write no lock at all, so their repeats go
+straight upstream. The remaining attempts are skipped when the lock is longer
+than that wait, when the request has spent its total wait budget, or when the
+status is account-scoped (401/402/403/404 — `isNonRetryableStatus`; the predicate
+is `canRepeatComboMember`). A 429 is *not* account-scoped: rate limits are
+transient, so a rate-limited member keeps its remaining attempts. Caps:
+`MAX_COMBO_ATTEMPTS` per member (10), `MAX_COMBO_TOTAL_ATTEMPTS` per request (32),
+and `COMBO_ATTEMPT_TOTAL_WAIT_MS` (default 15000ms) of lock waiting per request, so
+a combo of flaky models cannot hold the client open for minutes. Only a trailing
+positive integer counts, so a literal `#` in a model id is never eaten.
 
 ## OAuth Onboarding and Token Refresh Lifecycle
 

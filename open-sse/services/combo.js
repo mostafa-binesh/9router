@@ -343,9 +343,12 @@ function sleep(ms) {
 
 /**
  * Whether a failed member should be tried again, or the turn handed to the next
- * member. A repeat is only worth it when it can actually reach the provider:
- * every failure locks the connection for that model, so the combo must wait that
- * lock out — bounded per attempt, and bounded in total for the whole request.
+ * member. Credential and model errors end the member's turn immediately. Anything
+ * else repeats while the repeat can actually reach the provider: a failure on a
+ * keyed provider locks the connection for that model, so the combo waits that
+ * lock out (bounded per attempt, and bounded in total for the whole request); a
+ * free/no-auth provider writes no lock at all, so the repeat calls upstream at
+ * once.
  *
  * @param {Object} o
  * @param {number} o.remaining - attempts left for this member
@@ -505,9 +508,11 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
           break;
         }
 
-        // Repeat the same member. Every failure locked this model for the
-        // connection, so wait the lock out first — an immediate repeat would be
-        // answered from the lock table without reaching the provider.
+        // Repeat the same member. On a keyed provider this failure locked the
+        // model for the connection, so wait the lock out first — an immediate
+        // repeat would be answered from the lock table without reaching the
+        // provider. Free/no-auth providers write no lock (pauseMs is 0) and the
+        // repeat goes straight upstream.
         log.warn("COMBO", `Model ${modelStr} failed (${result.status}), attempt ${attempt}/${entryAttempts}${pauseMs ? ` after ${pauseMs}ms` : ""}`);
         if (pauseMs) {
           waitedMs += pauseMs;

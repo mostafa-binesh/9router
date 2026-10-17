@@ -165,6 +165,32 @@ describe("handleComboChat — attempts per member", () => {
     expect(result.ok).toBe(true);
   });
 
+  // Regression: a rate-limited free member used to be tried exactly once because
+  // 429 was treated as a credential failure.
+  it("retries a rate-limited member before handing the turn on", async () => {
+    const rateLimited = () => jsonResponse(429, { error: { message: "Rate limit exceeded" } });
+    const { handler, calls } = scriptedHandler([rateLimited, rateLimited, okResponse]);
+    const startedAt = Date.now();
+    const result = await handleComboChat({
+      body: {}, models: ["oc/deepseek#3", "p/b"], handleSingleModel: handler, log,
+    });
+    expect(calls).toEqual(["oc/deepseek", "oc/deepseek", "oc/deepseek"]);
+    expect(result.ok).toBe(true);
+    // A free/no-auth provider writes no model lock, so the repeat calls upstream
+    // at once instead of waiting a cooldown out.
+    expect(Date.now() - startedAt).toBeLessThan(900);
+  });
+
+  it("spends every configured attempt on a member that keeps rate limiting", async () => {
+    const rateLimited = () => jsonResponse(429, { error: { message: "Rate limit exceeded" } });
+    const { handler, calls } = scriptedHandler(Array.from({ length: 10 }, () => rateLimited).concat([okResponse]));
+    const result = await handleComboChat({
+      body: {}, models: ["oc/deepseek#10", "p/b"], handleSingleModel: handler, log,
+    });
+    expect(calls).toEqual(Array.from({ length: 10 }, () => "oc/deepseek").concat(["p/b"]));
+    expect(result.ok).toBe(true);
+  });
+
   it("retries a member whose call threw", async () => {
     const { handler, calls } = scriptedHandler([
       () => { throw new Error("socket hang up"); },
@@ -223,10 +249,17 @@ describe("canRepeatComboMember", () => {
     expect(canRepeatComboMember({ ...base, remaining: 0 })).toBe(false);
   });
 
-  it("does not repeat an account-scoped status", () => {
-    for (const status of [401, 402, 403, 404, 429]) {
+  it("does not repeat a credential or missing-model status", () => {
+    for (const status of [401, 402, 403, 404]) {
       expect(canRepeatComboMember({ ...base, status })).toBe(false);
     }
+  });
+
+  // Regression: a free tier answers 429 constantly, and the first version of the
+  // attempt feature listed 429 as non-retryable, so a `#10` member was tried once
+  // and the turn went to the next model.
+  it("repeats a rate limit that leaves attempts", () => {
+    expect(canRepeatComboMember({ ...base, status: 429 })).toBe(true);
   });
 
   it("does not wait out a lock longer than the per-attempt window", () => {

@@ -66,15 +66,21 @@ export function checkFallbackError(status, errorText, backoffLevel = 0, provider
 }
 
 // Statuses where repeating the identical call cannot succeed: the credential is
-// the problem (auth, billing, quota, rate limit) or the model does not exist.
-// Every one of them also locks the connection for the model, so an immediate
-// repeat is served from the lock table instead of reaching the provider.
+// the problem (rejected key, no billing) or the model does not exist. Every one
+// of them locks the connection for the model, so an immediate repeat is served
+// from the lock table instead of reaching the provider anyway.
+//
+// 429 is deliberately absent. A rate limit is transient by definition and is the
+// failure free tiers answer with constantly, so "repeat this model" must not be
+// blocked by it — that is exactly the case the caller wants repeats for (the
+// combo's `#N` attempts). Whether a repeat is worth it is decided by the retry
+// path from the lock itself: wait a short lock out and call again, skip the
+// member when the lock is longer than the wait the caller allows.
 export const NON_RETRYABLE_STATUSES = new Set([
   HTTP_STATUS.UNAUTHORIZED,
   HTTP_STATUS.PAYMENT_REQUIRED,
   HTTP_STATUS.FORBIDDEN,
   HTTP_STATUS.NOT_FOUND,
-  HTTP_STATUS.RATE_LIMITED,
 ]);
 
 /** True when repeating an identical call for this status is pointless. */
