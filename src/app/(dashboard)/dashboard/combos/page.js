@@ -9,6 +9,7 @@ import { Card, Button, Modal, Input, CardSkeleton, ModelSelectModal, ConfirmModa
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { aggregateComboCapabilities } from "open-sse/providers/capabilities.js";
+import { MAX_COMBO_ATTEMPTS, formatComboEntry, mergeComboEntryText, parseComboEntry } from "open-sse/services/comboEntry.js";
 
 // Validate combo name: only a-z, A-Z, 0-9, -, _
 const VALID_NAME_REGEX = /^[a-zA-Z0-9_.\-]+$/;
@@ -596,16 +597,24 @@ function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], cop
               {combo.models.length === 0 ? (
                 <span className="text-xs text-text-muted italic">No models</span>
               ) : (
-                combo.models.slice(0, 3).map((model, index) => (
-                  <code key={index} className="inline-flex items-center gap-1 rounded bg-black/5 px-1.5 py-0.5 font-mono text-xs text-text-muted dark:bg-white/5">
-                    <span>{model}</span>
-                    <CapacityBadges caps={
-                      comboByName[model]
-                        ? aggregateComboCapabilities(comboByName[model], comboByName, getCaps)
-                        : getCaps?.(model)
-                    } />
-                  </code>
-                ))
+                combo.models.slice(0, 3).map((model, index) => {
+                  const seat = parseComboEntry(model);
+                  return (
+                    <code key={index} className="inline-flex items-center gap-1 rounded bg-black/5 px-1.5 py-0.5 font-mono text-xs text-text-muted dark:bg-white/5">
+                      <span>{seat.model}</span>
+                      {seat.attempts > 1 && (
+                        <span className="font-semibold text-primary" title={`Tried up to ${seat.attempts} times before the next combo member`}>
+                          ×{seat.attempts}
+                        </span>
+                      )}
+                      <CapacityBadges caps={
+                        comboByName[seat.model]
+                          ? aggregateComboCapabilities(comboByName[seat.model], comboByName, getCaps)
+                          : getCaps?.(seat.model)
+                      } />
+                    </code>
+                  );
+                })
               )}
               {combo.models.length > 3 && (
                 <span className="text-[10px] text-text-muted">+{combo.models.length - 3} more</span>
@@ -908,7 +917,7 @@ function CapacityAdapterCap({ cap, entry, onChange, activeProviders, getCaps }) 
   );
 }
 
-function ModelItem({ id, index, model, isFirst, isLast, onEdit, onMoveUp, onMoveDown, onRemove }) {
+function ModelItem({ id, index, model, attempts, isFirst, isLast, onEdit, onSetAttempts, onMoveUp, onMoveDown, onRemove }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useSortable({ id });
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -973,6 +982,34 @@ function ModelItem({ id, index, model, isFirst, isLast, onEdit, onMoveUp, onMove
           {model}
         </div>
       )}
+
+      {/* Attempts: how often this member is tried before the combo moves on */}
+      <div
+        className="flex shrink-0 items-center gap-0.5"
+        title={`Try this model up to ${attempts} time${attempts === 1 ? "" : "s"} before the next combo member`}
+      >
+        <button
+          type="button"
+          onClick={() => onSetAttempts(attempts - 1)}
+          disabled={attempts <= 1}
+          className={`p-0.5 rounded ${attempts <= 1 ? "text-text-muted/20 cursor-not-allowed" : "text-text-muted hover:text-primary hover:bg-black/5 dark:hover:bg-white/5"}`}
+          title="Fewer attempts"
+        >
+          <span className="material-symbols-outlined text-[12px]">remove</span>
+        </button>
+        <span className={`w-5 text-center font-mono text-[10px] ${attempts > 1 ? "font-semibold text-primary" : "text-text-muted"}`}>
+          ×{attempts}
+        </span>
+        <button
+          type="button"
+          onClick={() => onSetAttempts(attempts + 1)}
+          disabled={attempts >= MAX_COMBO_ATTEMPTS}
+          className={`p-0.5 rounded ${attempts >= MAX_COMBO_ATTEMPTS ? "text-text-muted/20 cursor-not-allowed" : "text-text-muted hover:text-primary hover:bg-black/5 dark:hover:bg-white/5"}`}
+          title="More attempts"
+        >
+          <span className="material-symbols-outlined text-[12px]">add</span>
+        </button>
+      </div>
 
       {/* Priority arrows */}
       <div className="flex shrink-0 items-center gap-0.5">
@@ -1083,6 +1120,17 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
     setModels(models.filter((_, i) => i !== index));
   };
 
+  const handleSetAttempts = (index, attempts) => {
+    setModels(models.map((m, i) => (
+      i === index ? formatComboEntry(parseComboEntry(m).model, attempts) : m
+    )));
+  };
+
+  // Keep the attempt count when only the model id is edited by hand.
+  const handleEditModel = (index, value) => {
+    setModels(models.map((m, i) => (i === index ? mergeComboEntryText(value, m) : m)));
+  };
+
   const handleMoveUp = (index) => {
     if (index === 0) return;
     const newModels = [...models];
@@ -1147,13 +1195,11 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
                       id={uid}
                       index={index}
                       model={model}
+                      attempts={parseComboEntry(model).attempts}
                       isFirst={index === 0}
                       isLast={index === modelItems.length - 1}
-                      onEdit={(newVal) => {
-                        const updated = [...models];
-                        updated[index] = newVal;
-                        setModels(updated);
-                      }}
+                      onEdit={(newVal) => handleEditModel(index, newVal)}
+                      onSetAttempts={(attempts) => handleSetAttempts(index, attempts)}
                       onMoveUp={() => handleMoveUp(index)}
                       onMoveDown={() => handleMoveDown(index)}
                       onRemove={() => handleRemoveModel(index)}

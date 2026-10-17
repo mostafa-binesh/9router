@@ -627,6 +627,14 @@ Combo: "my-coding-stack"
 → Auto switches when quota runs out or errors occur
 ```
 
+Give a member an attempt count with `#N` to retry that model before moving on:
+
+```
+Combo: "deepseek-first"
+  1. deepseek/deepseek-v4-flash#3   (try it 3× before falling back)
+  2. glm/glm-4.7                    (1× default)
+```
+
 ### 📊 Real-Time Quota Tracking
 
 - Token consumption per provider
@@ -1155,6 +1163,28 @@ Models:
 
 Cost: $0 forever (+ 20-40% token savings via RTK)!
 ```
+
+### Example 3: Retry a Flaky Model Before Falling Back
+
+A member written as `provider/model#N` is tried up to N times before the next
+model gets the turn. In the dashboard, the `×N` stepper next to each model sets
+it; the stored form is the `#N` suffix.
+
+```
+Name: deepseek-first
+Models:
+  1. deepseek/deepseek-v4-flash#3 (still flaky? try 3×)
+  2. glm/glm-4.7 (then fall back)
+```
+
+Retries only happen when a repeat can actually reach the provider. Every failed
+call locks that connection for the model — quota/rate-limit locks last minutes,
+transient ones seconds — so 9Router waits a short lock out and retries, but
+skips straight to the next model when the lock is too long to wait for
+(`COMBO_ATTEMPT_LOCK_WAIT_MS`, default 5000) or when the status says the
+credential, not the request, is the problem (401/402/403/404/429). Cap: 10
+attempts per member, 32 per request, and `COMBO_ATTEMPT_TOTAL_WAIT_MS` (default
+15000) of lock waiting per request.
 
 </details>
 

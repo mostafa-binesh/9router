@@ -21,6 +21,7 @@ import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel, aggregateComboCapabilities } from "open-sse/providers/capabilities.js";
+import { parseComboEntry } from "open-sse/services/comboEntry.js";
 
 // Qoder shares one live resolver across intl (qoder) and CN (qoder-cn); the
 // credentials carry the provider id so qoderModels picks the right region's
@@ -288,7 +289,10 @@ function comboSeatLimits(combo, combosByName, visiting = new Set()) {
   let contextWindow = Infinity;
   let maxOutput = Infinity;
   try {
-    for (const seat of Array.isArray(combo?.models) ? combo.models : []) {
+    for (const seatEntry of Array.isArray(combo?.models) ? combo.models : []) {
+      // A combo member may carry an attempt suffix (`model#3`) — limits are keyed
+      // by the model id alone.
+      const seat = parseComboEntry(seatEntry).model;
       if (typeof seat !== "string") continue;
       const slash = seat.indexOf("/");
       if (slash <= 0) {

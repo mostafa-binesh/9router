@@ -239,6 +239,27 @@ flowchart TD
 
 Fallback decisions are driven by `open-sse/services/accountFallback.js` using status codes and error-message heuristics.
 
+### Combo member attempts (`model#N`)
+
+A combo member may carry an attempt count — `deepseek/x#3` (grammar in
+`open-sse/services/comboEntry.js`, one parser shared by the router and the
+dashboard). The combo tries that member up to 3 times before handing the turn to
+the next one; rotation and capability auto-switch treat a member as one slot, so
+a repeat never takes a rotation slot away from another model.
+
+Attempts respect the model lock: every failure locks the connection for that
+model (`markAccountUnavailable`), so an immediate repeat would be answered from
+the lock table without reaching the provider. `handleComboChat` therefore reads
+the lock's window from the failed response's `retry-after` header, waits it out
+when it is short (`COMBO_ATTEMPT_LOCK_WAIT_MS`, default 5000ms), and skips the
+remaining attempts when it is longer or when the status is account-scoped
+(401/402/403/404/429 — `isNonRetryableStatus`; the predicate is
+`canRepeatComboMember`). Caps: `MAX_COMBO_ATTEMPTS` per member (10),
+`MAX_COMBO_TOTAL_ATTEMPTS` per request (32), and `COMBO_ATTEMPT_TOTAL_WAIT_MS`
+(default 15000ms) of lock waiting per request, so a combo of flaky models cannot
+hold the client open for minutes. Only a trailing positive integer counts, so a
+literal `#` in a model id is never eaten.
+
 ## OAuth Onboarding and Token Refresh Lifecycle
 
 ```mermaid
@@ -356,6 +377,7 @@ erDiagram
       string name
       string[] models
     }
+    %% models members may carry an attempt count: "provider/model#3"
 
     API_KEY {
       string id

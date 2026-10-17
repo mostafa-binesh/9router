@@ -17,6 +17,7 @@ import { appendPxpipeEvent } from "@/lib/pxpipe/events.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
 import { upstreamResponseHeaders } from "open-sse/utils/upstreamHeaders.js";
 import { handleComboChat, handleFusionChat, detectRequiredCapabilities } from "open-sse/services/combo.js";
+import { parseComboModels, stripComboAttempts } from "open-sse/services/comboEntry.js";
 import { augmentModelsWithCapacityAdapter, withCapacityAdapterStripping, getActiveAdapterStrategy } from "open-sse/services/capacityAdapter.js";
 import { handleBypassRequest } from "open-sse/utils/bypassHandler.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
@@ -26,6 +27,23 @@ import { updateProviderCredentials, checkAndRefreshToken } from "../services/tok
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
 import { getKeyAccessContext, enforceKeyAccess, filterAdapterModels } from "../services/keyAccess.js";
+
+// Combo members may carry an attempt count (`provider/model#3`, see
+// open-sse/services/comboEntry.js). Capability lookups, key access and the
+// capacity adapter all reason about plain model ids, so those passes get the
+// stripped list and the counts are re-attached here, in order, duplicates
+// included. Adapter models injected by the capacity pass keep a single attempt.
+function withComboAttempts(members, augmented) {
+  const queues = new Map();
+  for (const member of parseComboModels(members)) {
+    if (!queues.has(member.model)) queues.set(member.model, []);
+    queues.get(member.model).push(member);
+  }
+  return augmented.map((model) => {
+    const queue = queues.get(model);
+    return (queue && queue.length > 0 ? queue.shift() : null) || { model, attempts: 1 };
+  });
+}
 
 /**
  * Handle chat completion request
@@ -104,18 +122,21 @@ export async function handleChat(request, clientRawRequest = null) {
   // Check if model is a combo (has multiple models with fallback)
   const comboModels = await getComboModels(modelStr);
   if (comboModels) {
+    // Attempt suffixes (`model#3`) are stripped for every id-based pass; the
+    // counts ride along separately and reach the combo loop via withComboAttempts.
+    const comboBaseModels = stripComboAttempts(comboModels);
     // Check for combo-specific strategy first, fallback to global
     const comboStrategies = settings.comboStrategies || {};
     const comboSpecificStrategy = comboStrategies[modelStr]?.fallbackStrategy;
     const comboStrategy = comboSpecificStrategy || settings.comboStrategy || "fallback";
-    const augmentedModels = await filterAdapterModels(keyAccess, augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, settings), comboModels);
-    const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
+    const augmentedModels = await filterAdapterModels(keyAccess, augmentModelsWithCapacityAdapter(comboBaseModels, requiredCapabilities, settings), comboBaseModels);
+    const adapterAdded = augmentedModels.filter((m) => !comboBaseModels.includes(m));
 
     if (comboStrategy === "fusion") {
-      log.info("CHAT", `Combo "${modelStr}" with ${comboModels.length} models (strategy: fusion)`);
+      log.info("CHAT", `Combo "${modelStr}" with ${comboBaseModels.length} models (strategy: fusion)`);
       return handleFusionChat({
         body,
-        models: comboModels,
+        models: comboBaseModels,
         handleSingleModel: (b, m, isPanel) => {
           let cleanRawReq = clientRawRequest;
           if (isPanel && clientRawRequest) {
@@ -135,7 +156,7 @@ export async function handleChat(request, clientRawRequest = null) {
     log.info("CHAT", `Combo "${modelStr}" with ${augmentedModels.length} models (strategy: ${comboStrategy}, sticky: ${comboStickyLimit})`);
     return handleComboChat({
       body,
-      models: augmentedModels,
+      models: withComboAttempts(comboModels, augmentedModels),
       handleSingleModel: withCapacityAdapterStripping(
         (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
         adapterAdded
@@ -188,14 +209,15 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       // Nested combo (a combo member that is itself a combo): the access decision
       // was made on the outer target; only drop adapter models the key may not call.
       const keyAccess = await getKeyAccessContext(request);
-      const augmentedModels = await filterAdapterModels(keyAccess, augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, chatSettings), comboModels);
-      const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
+      const comboBaseModels = stripComboAttempts(comboModels);
+      const augmentedModels = await filterAdapterModels(keyAccess, augmentModelsWithCapacityAdapter(comboBaseModels, requiredCapabilities, chatSettings), comboBaseModels);
+      const adapterAdded = augmentedModels.filter((m) => !comboBaseModels.includes(m));
 
       if (comboStrategy === "fusion") {
-        log.info("CHAT", `Combo "${modelStr}" with ${comboModels.length} models (strategy: fusion)`);
+        log.info("CHAT", `Combo "${modelStr}" with ${comboBaseModels.length} models (strategy: fusion)`);
         return handleFusionChat({
           body,
-          models: comboModels,
+          models: comboBaseModels,
           handleSingleModel: (b, m, isPanel) => {
             let cleanRawReq = clientRawRequest;
             if (isPanel && clientRawRequest) {
@@ -215,7 +237,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       log.info("CHAT", `Combo "${modelStr}" with ${augmentedModels.length} models (strategy: ${comboStrategy}, sticky: ${comboStickyLimit})`);
       return handleComboChat({
         body,
-        models: augmentedModels,
+        models: withComboAttempts(comboModels, augmentedModels),
         handleSingleModel: withCapacityAdapterStripping(
           (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
           adapterAdded

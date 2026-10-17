@@ -37,6 +37,7 @@
 
 import { matchPattern } from "./pricing.js";
 import { looksLikeVisionModel } from "./visionPatterns.js";
+import { parseComboEntry } from "../services/comboEntry.js";
 
 /**
  * Safe floor — every resolved result is merged over this so consumers
@@ -583,7 +584,10 @@ export const PATTERN_CAPABILITIES = [
  */
 export function aggregateComboCapabilities(comboModels, comboLookup = null, resolveCaps = null, _depth = 0) {
   if (!comboModels?.length || _depth > 6) return null;
-  const allCaps = comboModels.map((fullId) => {
+  const allCaps = comboModels.map((entry) => {
+    // A combo member may carry an attempt suffix (`model#3`); capabilities are
+    // keyed by the model id alone.
+    const fullId = parseComboEntry(entry).model;
     // Nested combo: bare name (no slash) that exists in the lookup — recurse
     if (!fullId.includes("/") && comboLookup?.[fullId]) {
       return aggregateComboCapabilities(comboLookup[fullId], comboLookup, resolveCaps, _depth + 1)
