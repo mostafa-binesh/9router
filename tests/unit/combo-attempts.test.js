@@ -276,6 +276,67 @@ describe("canRepeatComboMember", () => {
     expect(canRepeatComboMember({ ...base, pauseMs: 1_000, waitedMs: 14_000 })).toBe(true);
     expect(canRepeatComboMember({ ...base, pauseMs: 1_000, waitedMs: 14_500 })).toBe(false);
   });
+
+  // Regression: OpenCode's free tier answers a burst with 403 FreeTierError
+  // ("the free tier can only be used from within OpenCode"). It is a per-session
+  // throttle that clears within seconds — live, a member 403s and then succeeds
+  // on a repeat. Reading it as a credential error cut every `#N` member down to a
+  // single attempt and sent the turn straight to a non-gated model.
+  it("repeats a 403 from OpenCode's free-tier burst gate", () => {
+    const message = "OpenCode's free tier can only be used from within OpenCode. Download it at https://opencode.ai and keep building.";
+    // The combo parses error.message; the whole body is accepted too.
+    expect(canRepeatComboMember({ ...base, status: 403, errorText: message })).toBe(true);
+    expect(canRepeatComboMember({ ...base, status: 403, errorText: JSON.stringify({ type: "error", error: { type: "FreeTierError", message } }) })).toBe(true);
+  });
+
+  it("still refuses a 403 that is a real credential problem", () => {
+    expect(canRepeatComboMember({ ...base, status: 403, errorText: "invalid api key" })).toBe(false);
+    expect(canRepeatComboMember({ ...base, status: 403 })).toBe(false);
+    // The gate wording only exempts a 403; a 401 keeps ending the turn.
+    expect(canRepeatComboMember({ ...base, status: 401, errorText: "OpenCode's free tier can only be used from within OpenCode." })).toBe(false);
+  });
+});
+
+describe("free-tier gate inside a combo turn", () => {
+  const gate = () => jsonResponse(403, {
+    type: "error",
+    error: { type: "FreeTierError", message: "OpenCode's free tier can only be used from within OpenCode." },
+  });
+
+  it("spends the member's remaining attempts before falling through", async () => {
+    const { handler, calls } = scriptedHandler([gate, gate, okResponse]);
+    const res = await handleComboChat({
+      body: { messages: [{ role: "user", content: "hi" }] },
+      models: ["opencode/deepseek-v4.1-flash-free#4", "opencode/big-pickle"],
+      handleSingleModel: handler,
+      log,
+    });
+
+    expect(res.status).toBe(200);
+    // Three calls to the gated member, not one: the two 403s were repeated, and
+    // its success means the turn never reached the fallback member.
+    expect(calls).toEqual([
+      "opencode/deepseek-v4.1-flash-free",
+      "opencode/deepseek-v4.1-flash-free",
+      "opencode/deepseek-v4.1-flash-free",
+    ]);
+  });
+
+  it("hands the turn to the next member when a non-gate 403 persists", async () => {
+    const { handler, calls } = scriptedHandler([
+      () => jsonResponse(403, { error: { message: "invalid api key" } }),
+      okResponse,
+    ]);
+    const res = await handleComboChat({
+      body: { messages: [{ role: "user", content: "hi" }] },
+      models: ["opencode/deepseek-v4.1-flash-free#4", "opencode/big-pickle"],
+      handleSingleModel: handler,
+      log,
+    });
+
+    expect(res.status).toBe(200);
+    expect(calls).toEqual(["opencode/deepseek-v4.1-flash-free", "opencode/big-pickle"]);
+  });
 });
 
 describe("auto-switch and capability lookups with attempt suffixes", () => {

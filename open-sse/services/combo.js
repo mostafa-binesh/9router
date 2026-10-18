@@ -2,7 +2,7 @@
  * Shared combo (model combo) handling with fallback support
  */
 
-import { checkFallbackError, formatRetryAfter, isNonRetryableStatus } from "./accountFallback.js";
+import { checkFallbackError, formatRetryAfter, isFreeTierGateError, isNonRetryableStatus } from "./accountFallback.js";
 import { unavailableResponse } from "../utils/error.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { extractTextContent } from "../translator/formats/gemini.js";
@@ -364,18 +364,21 @@ function sleep(ms) {
  * member. Credential and model errors end the member's turn immediately; anything
  * else keeps its remaining attempts while the request still has pause budget left
  * (a repeat that cannot reach the provider is paced, not skipped — see
- * `repeatPauseMs`).
+ * `repeatPauseMs`). The one 403 that does not end the turn is OpenCode's
+ * free-tier burst gate: a throttle that clears within seconds, not a rejected
+ * credential (see `isFreeTierGateError`).
  *
  * @param {Object} o
  * @param {number} o.remaining - attempts left for this member
  * @param {number} o.status - HTTP status of the failed attempt
  * @param {number} o.pauseMs - the pause a repeat would wait
  * @param {number} o.waitedMs - pause already spent on this request
+ * @param {string} [o.errorText] - upstream error text, screened for the gate
  * @returns {boolean}
  */
-export function canRepeatComboMember({ remaining, status, pauseMs, waitedMs }) {
+export function canRepeatComboMember({ remaining, status, pauseMs, waitedMs, errorText = "" }) {
   if (remaining <= 0) return false;
-  if (isNonRetryableStatus(status)) return false;
+  if (isNonRetryableStatus(status) && !isFreeTierGateError(status, errorText)) return false;
   return waitedMs + pauseMs <= COMBO_ATTEMPT_TOTAL_WAIT_MS;
 }
 
@@ -504,11 +507,11 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
         const remaining = entryAttempts - attempt;
         const lockMs = retryAfter ? Math.max(retryAfter - Date.now(), 0) : 0;
         const pauseMs = repeatPauseMs({ lockMs, status: result.status, cooldownMs });
-        const canRepeat = canRepeatComboMember({ remaining, status: result.status, pauseMs, waitedMs });
+        const canRepeat = canRepeatComboMember({ remaining, status: result.status, pauseMs, waitedMs, errorText });
 
         if (!canRepeat) {
           if (remaining > 0) {
-            const why = isNonRetryableStatus(result.status)
+            const why = isNonRetryableStatus(result.status) && !isFreeTierGateError(result.status, errorText)
               ? "credential/model error"
               : `pause budget of ${COMBO_ATTEMPT_TOTAL_WAIT_MS}ms spent`;
             log.info("COMBO", `Model ${modelStr} failed (${result.status}, ${why}), skipping remaining ${remaining} attempt(s)`);

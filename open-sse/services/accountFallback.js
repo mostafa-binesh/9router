@@ -88,6 +88,25 @@ export function isNonRetryableStatus(status) {
   return NON_RETRYABLE_STATUSES.has(status);
 }
 
+// OpenCode's free tier answers a burst of combo attempts with 403 FreeTierError
+// ("the free tier can only be used from within OpenCode"). It is the same
+// per-session throttle that surfaces as 429 FreeUsageLimitError, and it clears
+// within seconds — live: a member 403s, then succeeds on a repeat two seconds
+// later. That is a pacing problem, not a rejected credential, so the combo may
+// spend the member's remaining `#N` attempts on it. Every other 403 (rejected
+// key, plan/entitlement) keeps the non-retryable treatment above.
+const FREE_TIER_GATE_PATTERNS = [
+  /freetiererror/i, // error.type, when the body reaches the caller whole
+  /can only be used from within opencode/i, // error.message, which the combo parses
+];
+
+/** True when a 403 is OpenCode's transient free-tier burst gate. */
+export function isFreeTierGateError(status, errorText) {
+  if (status !== HTTP_STATUS.FORBIDDEN) return false;
+  const text = typeof errorText === "string" ? errorText : JSON.stringify(errorText ?? "");
+  return FREE_TIER_GATE_PATTERNS.some((pattern) => pattern.test(text));
+}
+
 /**
  * Check if account is currently unavailable (cooldown not expired)
  */
