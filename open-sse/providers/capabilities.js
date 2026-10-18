@@ -220,6 +220,20 @@ export const PROVIDER_CAPABILITIES = {
     "deepseek-ai/deepseek-v4-pro": { reasoning: true, thinkingFormat: "openai", contextWindow: 1000000, maxOutput: 65536 },
     "deepseek-ai/deepseek-v4-flash": { reasoning: true, thinkingFormat: "openai", contextWindow: 1000000, maxOutput: 65536 },
   },
+  // GLM ids on OpenCode Free ride the same zen backend as OpenCode Go: it rejects
+  // the z.ai `thinking` object (400 `invalid_request_error`, param "thinking",
+  // `json: unknown field "thinking"`) and wants reasoning_effort — see the
+  // opencode-go entry below, which fixes the same model for that provider. The
+  // free id carries a `-free` suffix, so it misses the exact `glm-5.3-flash` entry
+  // and fell through to the global *glm-5.3* pattern, whose z.ai shape is correct
+  // for z.ai itself. Reproduced live 2026-10-18: the same request answered 400
+  // with the native object and 200 without it. The free catalog's other
+  // native-format ids (deepseek-*, mimo-*) accept the object live, so they keep
+  // their patterns. Provider overrides short-circuit the catalog overlay, so the
+  // limits below mirror the *glm-5.3* pattern this id used to match.
+  "opencode": {
+    "glm-5.3-flash-free": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 128000 },
+  },
   // glm-5.3-flash on OpenCode Go is served by a backend that rejects the z.ai
   // `thinking` object (400: unknown field "thinking") and wants reasoning_effort.
   // Overrides the global entry, whose z.ai shape is correct for z.ai itself.
