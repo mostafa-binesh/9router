@@ -63,6 +63,28 @@ describe("opencodeTlsClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("binds one session per proxy route and reuses each route's session", async () => {
+    const directFetch = vi.fn(async () => new Response("direct", { status: 200 }));
+    const proxiedFetch = vi.fn(async () => new Response("proxied", { status: 200 }));
+    createSessionMock
+      .mockResolvedValueOnce({ fetch: directFetch, close: vi.fn() })
+      .mockResolvedValueOnce({ fetch: proxiedFetch, close: vi.fn() });
+
+    const { opencodeTlsFetch } = await import("../../open-sse/services/opencodeTlsClient.js");
+    const proxyUrl = "http://token:token@relay.internal:10003";
+    await opencodeTlsFetch("https://opencode.ai/a", {});
+    await opencodeTlsFetch("https://opencode.ai/b", {}, { proxyUrl });
+    await opencodeTlsFetch("https://opencode.ai/c", {}, { proxyUrl });
+    await opencodeTlsFetch("https://opencode.ai/d", {});
+
+    // The proxy must ride the impersonating session, never a separate transport.
+    expect(createSessionMock).toHaveBeenCalledTimes(2);
+    expect(createSessionMock.mock.calls[0][0].proxy).toBeUndefined();
+    expect(createSessionMock.mock.calls[1][0].proxy).toBe(proxyUrl);
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(proxiedFetch).toHaveBeenCalledTimes(2);
+  });
+
   it("surfaces an actionable error when wreq-js is unavailable", async () => {
     loadRuntimeDepMock.mockRejectedValue(new Error("MODULE_NOT_FOUND"));
 

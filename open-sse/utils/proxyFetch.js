@@ -354,9 +354,12 @@ function isBodyReplaySafe(body) {
 
 async function fetchWithTlsFallback(url, options, proxyUrl, forceFreshSocket = false) {
   try {
-    // Protocol adapters may need Node's HTTP/1 transport on the direct path.
-    // Keep proxy/no-proxy resolution and strict-proxy enforcement here.
-    if (!proxyUrl && options.directFetch) return await options.directFetch(url, options);
+    // Protocol adapters may need their own transport (opencode's TLS fingerprint).
+    // A standard proxy has to ride that transport: undici's ProxyAgent would swap
+    // the impersonated ClientHello for Node's, which the free tier refuses.
+    if (options.directFetch) {
+      return await options.directFetch(url, proxyUrl ? { ...options, proxyUrl } : options);
+    }
     const dispatcher = await getDispatcher(proxyUrl, false, forceFreshSocket);
     return await rawFetch(url, { ...options, dispatcher });
   } catch (err) {

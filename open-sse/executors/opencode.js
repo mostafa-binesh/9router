@@ -404,9 +404,8 @@ export class OpenCodeExecutor extends BaseExecutor {
 
   // The free gate keys on the TLS ClientHello, so a native Node fetch is refused
   // no matter how faithful the body is. Route through the impersonating client
-  // and keep proxy handling on the existing path (proxyAwareFetch delegates to
-  // `directFetch` when no proxy is configured). Fail-open: without wreq-js the
-  // request still goes out on native fetch instead of erroring here.
+  // and let it own the proxy tunnel too: an HTTP proxied request otherwise falls
+  // back to Node's fingerprint, which the free tier answers 429 FreeUsageLimitError.
   async execute(args) {
     const credentials = this.prepareRequestCredentials(args);
     return super.execute({
@@ -416,7 +415,7 @@ export class OpenCodeExecutor extends BaseExecutor {
         method: options.method,
         headers: options.headers,
         body: options.body,
-      }, { signal: options.signal }),
+      }, { signal: options.signal, proxyUrl: options.proxyUrl || "" }),
     });
   }
 

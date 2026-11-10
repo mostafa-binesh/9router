@@ -37,7 +37,12 @@ const OPENCODE_CIPHER_LIST = [
 
 const DEFAULT_TIMEOUT_MS = 120000;
 
-let sessionPromise = null;
+// One session per egress route: the proxy belongs to the impersonated transport.
+// Handing the proxy to undici instead would substitute Node's ClientHello and the
+// upstream free tier answers 429 FreeUsageLimitError (measured 2026-11-10 through
+// a CONNECT proxy that worked for every other host).
+const sessions = new Map();
+const DIRECT_KEY = "";
 
 export class OpencodeTlsUnavailableError extends Error {
   constructor(message) {
@@ -46,42 +51,51 @@ export class OpencodeTlsUnavailableError extends Error {
   }
 }
 
-async function loadSession() {
-  if (!sessionPromise) {
-    sessionPromise = (async () => {
-      const wreq = await loadRuntimeDep("wreq-js");
-      if (typeof wreq.createSession !== "function") {
-        throw new Error("wreq-js runtime is missing createSession");
-      }
-      return wreq.createSession({
-        emulation: { tlsOptions: { cipherList: OPENCODE_CIPHER_LIST } },
-      });
-    })().catch((error) => {
-      sessionPromise = null;
-      throw error;
+async function loadSession(proxyUrl = DIRECT_KEY) {
+  const key = proxyUrl || DIRECT_KEY;
+  const cached = sessions.get(key);
+  if (cached) return cached;
+
+  const pending = (async () => {
+    const wreq = await loadRuntimeDep("wreq-js");
+    if (typeof wreq.createSession !== "function") {
+      throw new Error("wreq-js runtime is missing createSession");
+    }
+    return wreq.createSession({
+      emulation: { tlsOptions: { cipherList: OPENCODE_CIPHER_LIST } },
+      ...(key ? { proxy: key } : {}),
     });
-  }
-  return sessionPromise;
+  })().catch((error) => {
+    sessions.delete(key);
+    throw error;
+  });
+
+  sessions.set(key, pending);
+  return pending;
 }
 
-/** Drop the cached session so the next call builds a fresh one. */
+/** Drop cached sessions so the next call builds fresh ones. */
 export function resetOpencodeTlsSession() {
-  const pending = sessionPromise;
-  sessionPromise = null;
-  pending?.then((session) => session.close?.()).catch(() => {});
+  const pending = [...sessions.values()];
+  sessions.clear();
+  for (const session of pending) {
+    session?.then((handle) => handle.close?.()).catch(() => {});
+  }
 }
 
 /**
- * Fetch through the impersonated-TLS session. Returns a native Response so
- * downstream `.body` / `.text()` / `.json()` consumers keep working unchanged.
+ * Fetch through a session bound to `proxyUrl` when one is configured, so the
+ * CONNECT tunnel carries the impersonated TLS instead of Node's. Returns a
+ * native Response so downstream `.body` / `.text()` / `.json()` consumers keep
+ * working unchanged.
  *
  * Streaming is preserved: the response body is handed over as the live
  * ReadableStream, never buffered.
  */
-export async function opencodeTlsFetch(url, init = {}, { signal, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+export async function opencodeTlsFetch(url, init = {}, { signal, timeoutMs = DEFAULT_TIMEOUT_MS, proxyUrl = "" } = {}) {
   let session;
   try {
-    session = await loadSession();
+    session = await loadSession(proxyUrl);
   } catch (error) {
     throw new OpencodeTlsUnavailableError(
       `wreq-js unavailable (${error instanceof Error ? error.message : "unknown"}) — install the optional wreq-js dependency to reach the OpenCode free tier`
